@@ -152,6 +152,22 @@ def calculate_confidence(moisture, drying_rate, time_elapsed):
     return round(min(0.97, max(0.65, base + noise)), 2)
 
 
+@app.route("/", methods=["GET"])
+def index():
+    """Root endpoint."""
+    return jsonify({
+        "service": "grAIn ML Prediction Service",
+        "version": model_metadata["version"] if model_metadata else "unknown",
+        "status": "running",
+        "endpoints": {
+            "POST /predict": "Get drying predictions",
+            "POST /predict/curve": "Get detailed moisture curve",
+            "GET /health": "Health check",
+            "GET /model/info": "Model metadata and metrics",
+        },
+    })
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """Health check endpoint."""
