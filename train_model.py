@@ -60,10 +60,10 @@ def train_moisture_model(X_train, X_test, y_train, y_test):
     print("=" * 60)
 
     model = RandomForestRegressor(
-        n_estimators=200,
-        max_depth=20,
-        min_samples_split=5,
-        min_samples_leaf=3,
+        n_estimators=100,
+        max_depth=15,
+        min_samples_split=10,
+        min_samples_leaf=5,
         max_features="sqrt",
         random_state=42,
         n_jobs=-1,
@@ -125,10 +125,10 @@ def train_time_model(X_train, X_test, y_train, y_test):
     y_test_log = np.log1p(y_test)
 
     model = RandomForestRegressor(
-        n_estimators=300,
-        max_depth=25,
-        min_samples_split=5,
-        min_samples_leaf=2,
+        n_estimators=100,
+        max_depth=15,
+        min_samples_split=10,
+        min_samples_leaf=5,
         max_features="sqrt",
         random_state=42,
         n_jobs=-1,
@@ -296,8 +296,8 @@ def main():
         "trained_at": datetime.now().isoformat(),
         "framework": "scikit-learn",
         "algorithm": {
-            "moisture_model": "RandomForestRegressor (n=200, depth=20)",
-            "time_model": "RandomForestRegressor (n=300, depth=25, log-transformed target)",
+            "moisture_model": "RandomForestRegressor (n=100, depth=15)",
+            "time_model": "RandomForestRegressor (n=100, depth=15, log-transformed target)",
         },
         "features": FEATURE_COLUMNS,
         "targets": {
@@ -322,17 +322,17 @@ def main():
         },
         "hyperparameters": {
             "moisture_model": {
-                "n_estimators": 200,
-                "max_depth": 20,
-                "min_samples_split": 5,
-                "min_samples_leaf": 3,
+                "n_estimators": 100,
+                "max_depth": 15,
+                "min_samples_split": 10,
+                "min_samples_leaf": 5,
                 "max_features": "sqrt",
             },
             "time_model": {
-                "n_estimators": 300,
-                "max_depth": 25,
-                "min_samples_split": 5,
-                "min_samples_leaf": 2,
+                "n_estimators": 100,
+                "max_depth": 15,
+                "min_samples_split": 10,
+                "min_samples_leaf": 5,
                 "max_features": "sqrt",
                 "target_transform": "log1p",
             },

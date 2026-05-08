@@ -25,16 +25,14 @@ CORS(app, origins=["*"])
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 moisture_model = None
-time_model = None
 model_metadata = None
 
 
 def load_models():
     """Load trained models and metadata."""
-    global moisture_model, time_model, model_metadata
+    global moisture_model, model_metadata
 
     moisture_path = os.path.join(MODEL_DIR, "moisture_predictor.joblib")
-    time_path = os.path.join(MODEL_DIR, "time_predictor.joblib")
     metadata_path = os.path.join(MODEL_DIR, "model_metadata.json")
 
     if not os.path.exists(moisture_path):
@@ -42,7 +40,6 @@ def load_models():
         return False
 
     moisture_model = joblib.load(moisture_path)
-    time_model = joblib.load(time_path)
 
     with open(metadata_path, "r") as f:
         model_metadata = json.load(f)
