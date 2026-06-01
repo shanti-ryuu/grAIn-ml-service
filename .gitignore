@@ -13,3 +13,5 @@ data/
 models/
 *.joblib
 .DS_Store
+AGENTS.md
+DOCUMENTATION.md

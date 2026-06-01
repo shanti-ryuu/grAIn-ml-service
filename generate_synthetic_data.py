@@ -255,7 +255,7 @@ def main():
     print("Rice Grain Drying - Page's Equation Model")
     print("=" * 60)
 
-    num_sessions = 30  # Generate 30 complete drying sessions
+    num_sessions = 50  # Generate 50 complete drying sessions
 
     print(f"\nGenerating {num_sessions} synthetic drying sessions...")
 

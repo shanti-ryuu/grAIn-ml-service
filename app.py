@@ -6,47 +6,31 @@ Flask REST API that serves drying predictions using trained ML models.
 Endpoints:
   POST /predict          - Get moisture and time predictions
   GET  /health           - Health check
+  GET  /api/v1/ping      - Render keep-alive ping
   GET  /model/info       - Model metadata and metrics
-  POST /predict/curve    - Get full 6-hour projected moisture curve
+  GET  /model/compare    - Model comparison table
+  POST /predict/curve    - Get full 8-hour projected moisture curve
 """
 
-import os
 import json
-import numpy as np
-import joblib
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+import os
 from datetime import datetime
+
+import joblib
+import numpy as np
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app, origins=["*"])
 
-# Load models on startup
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
-moisture_model = None
+moisture_model_rf = None
+moisture_model_xgb = None
 model_metadata = None
-
-
-def load_models():
-    """Load trained models and metadata."""
-    global moisture_model, model_metadata
-
-    moisture_path = os.path.join(MODEL_DIR, "moisture_predictor.joblib")
-    metadata_path = os.path.join(MODEL_DIR, "model_metadata.json")
-
-    if not os.path.exists(moisture_path):
-        print("WARNING: Models not found. Run train_model.py first.")
-        return False
-
-    moisture_model = joblib.load(moisture_path)
-
-    with open(metadata_path, "r") as f:
-        model_metadata = json.load(f)
-
-    print(f"Models loaded successfully (v{model_metadata['version']})")
-    return True
-
+rf_weight = 0.5
+xgb_weight = 0.5
 
 FEATURE_ORDER = [
     "temperature",
@@ -61,6 +45,51 @@ FEATURE_ORDER = [
 ]
 
 TARGET_MOISTURE = 14.0
+
+
+def load_models():
+    """Load trained models and metadata."""
+    global moisture_model_rf, moisture_model_xgb, model_metadata, rf_weight, xgb_weight
+
+    rf_path = os.path.join(MODEL_DIR, "moisture_predictor_rf.joblib")
+    xgb_path = os.path.join(MODEL_DIR, "moisture_predictor_xgb.joblib")
+    legacy_path = os.path.join(MODEL_DIR, "moisture_predictor.joblib")
+    metadata_path = os.path.join(MODEL_DIR, "model_metadata.json")
+
+    if os.path.exists(rf_path):
+        moisture_model_rf = joblib.load(rf_path)
+        print("RF model loaded OK")
+    elif os.path.exists(legacy_path):
+        moisture_model_rf = joblib.load(legacy_path)
+        print("RF model loaded from legacy moisture_predictor.joblib OK")
+    else:
+        print("WARNING: RF model not found. Run train_model.py first.")
+
+    if os.path.exists(xgb_path):
+        try:
+            moisture_model_xgb = joblib.load(xgb_path)
+            print("XGBoost model loaded OK")
+        except Exception as exc:
+            moisture_model_xgb = None
+            print(f"WARNING: XGBoost model could not be loaded. Falling back to RF-only predictions. {exc}")
+    else:
+        print("WARNING: XGBoost model not found. Falling back to RF-only predictions.")
+
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r") as f:
+            model_metadata = json.load(f)
+        ensemble = model_metadata.get("ensemble", {})
+        rf_weight = float(ensemble.get("rf_weight", 0.5))
+        xgb_weight = float(ensemble.get("xgb_weight", 0.5))
+    else:
+        print("WARNING: model_metadata.json not found.")
+
+    print(f"Ensemble weights: RF={rf_weight:.2f}, XGB={xgb_weight:.2f}")
+    return moisture_model_rf is not None
+
+
+def active_algorithm_name() -> str:
+    return "Ensemble (RF+XGBoost)" if moisture_model_rf is not None and moisture_model_xgb is not None else "RandomForest"
 
 
 def prepare_features(data: dict) -> np.ndarray:
@@ -83,8 +112,36 @@ def prepare_features(data: dict) -> np.ndarray:
     return np.array([features])
 
 
-def generate_recommendation(moisture, temperature, humidity, fan_speed,
-                            predicted_moisture, time_to_target):
+def predict_moisture(features: np.ndarray) -> float:
+    """Predict moisture with weighted ensemble when XGBoost is available."""
+    if moisture_model_rf is None:
+        raise RuntimeError("RF model is not loaded")
+
+    rf_pred = float(moisture_model_rf.predict(features)[0])
+    if moisture_model_xgb is None:
+        return rf_pred
+
+    xgb_pred = float(moisture_model_xgb.predict(features)[0])
+    return (rf_weight * rf_pred) + (xgb_weight * xgb_pred)
+
+
+def model_metric(model_key: str, metric: str):
+    if not model_metadata:
+        return None
+    return model_metadata.get("metrics", {}).get(model_key, {}).get(metric)
+
+
+def model_metrics_payload() -> dict:
+    return {
+        "moistureR2_rf": model_metric("random_forest", "r2"),
+        "moistureR2_xgb": model_metric("xgboost", "r2"),
+        "moistureR2_ensemble": model_metric("ensemble", "r2"),
+        "rfWeight": rf_weight,
+        "xgbWeight": xgb_weight,
+    }
+
+
+def generate_recommendation(moisture, temperature, humidity, fan_speed, predicted_moisture, time_to_target):
     """Generate human-readable optimization recommendation."""
     if moisture <= TARGET_MOISTURE:
         return {
@@ -94,13 +151,13 @@ def generate_recommendation(moisture, temperature, humidity, fan_speed,
         }
     if temperature > 65.0:
         return {
-            "text": f"Temperature too high ({temperature:.1f}°C). Reduce by 5-10°C to prevent thermal damage to grain.",
+            "text": f"Temperature too high ({temperature:.1f}C). Reduce by 5-10C to prevent thermal damage to grain.",
             "type": "critical",
             "action": "REDUCE_TEMP",
         }
     if temperature < 38.0 and moisture > 16.0:
         return {
-            "text": f"Temperature too low ({temperature:.1f}°C). Increase to 45-55°C for optimal drying rate.",
+            "text": f"Temperature too low ({temperature:.1f}C). Increase to 45-55C for optimal drying rate.",
             "type": "warning",
             "action": "INCREASE_TEMP",
         }
@@ -164,6 +221,7 @@ def index():
             "POST /predict/curve": "Get detailed moisture curve",
             "GET /health": "Health check",
             "GET /model/info": "Model metadata and metrics",
+            "GET /model/compare": "Compare RF, XGBoost, and ensemble metrics",
         },
     })
 
@@ -173,10 +231,22 @@ def health():
     """Health check endpoint."""
     return jsonify({
         "status": "healthy",
-        "models_loaded": moisture_model is not None,
-        "version": model_metadata["version"] if model_metadata else "unknown",
+        "models_loaded": {
+            "rf": moisture_model_rf is not None,
+            "xgb": moisture_model_xgb is not None,
+            "ensemble": moisture_model_rf is not None and moisture_model_xgb is not None,
+        },
+        "active_algorithm": active_algorithm_name(),
+        "version": model_metadata["version"] if model_metadata else "2.0.0",
         "timestamp": datetime.now().isoformat(),
     })
+
+
+@app.route("/ping", methods=["GET"])
+@app.route("/api/v1/ping", methods=["GET"])
+def ping():
+    """Lightweight Render keep-alive endpoint."""
+    return "pong", 200, {"Content-Type": "text/plain", "Cache-Control": "no-store"}
 
 
 @app.route("/model/info", methods=["GET"])
@@ -185,64 +255,70 @@ def model_info():
     if model_metadata is None:
         return jsonify({"error": "Models not loaded"}), 503
 
+    return jsonify(model_metadata)
+
+
+@app.route("/model/compare", methods=["GET"])
+def model_compare():
+    """Return comparison metrics for all moisture prediction models."""
+    if model_metadata is None:
+        return jsonify({"error": "Models not loaded"}), 503
+
+    metrics = model_metadata.get("metrics", {})
+    comparison = [
+        {
+            "model": "Random Forest",
+            "r2": metrics.get("random_forest", {}).get("r2"),
+            "rmse": metrics.get("random_forest", {}).get("rmse"),
+            "mae": metrics.get("random_forest", {}).get("mae"),
+            "mape": metrics.get("random_forest", {}).get("mape"),
+            "cv_r2": metrics.get("random_forest", {}).get("cv_r2_mean"),
+            "weight": rf_weight,
+        },
+        {
+            "model": "XGBoost",
+            "r2": metrics.get("xgboost", {}).get("r2"),
+            "rmse": metrics.get("xgboost", {}).get("rmse"),
+            "mae": metrics.get("xgboost", {}).get("mae"),
+            "mape": metrics.get("xgboost", {}).get("mape"),
+            "cv_r2": metrics.get("xgboost", {}).get("cv_r2_mean"),
+            "weight": xgb_weight,
+        },
+        {
+            "model": "Ensemble (RF+XGBoost)",
+            "r2": metrics.get("ensemble", {}).get("r2"),
+            "rmse": metrics.get("ensemble", {}).get("rmse"),
+            "mae": metrics.get("ensemble", {}).get("mae"),
+            "mape": metrics.get("ensemble", {}).get("mape"),
+            "cv_r2": None,
+            "weight": None,
+            "isActive": moisture_model_rf is not None and moisture_model_xgb is not None,
+        },
+    ]
+
     return jsonify({
-        "version": model_metadata["version"],
-        "trained_at": model_metadata["trained_at"],
-        "algorithm": model_metadata["algorithm"],
-        "features": model_metadata["features"],
-        "metrics": model_metadata["metrics"],
-        "feature_importance": model_metadata["feature_importance"],
-        "training_data": model_metadata["training_data"],
+        "comparison": comparison,
+        "activeModel": active_algorithm_name(),
+        "version": model_metadata.get("version", "2.0.0"),
     })
 
 
 @app.route("/predict", methods=["POST"])
 def predict():
-    """
-    Main prediction endpoint.
-
-    Request body:
-    {
-        "deviceId": "GR-001",
-        "temperature": 52.3,
-        "humidity": 45.2,
-        "moisture": 18.5,
-        "fanSpeed": 75.0,
-        "timeElapsed": 60,
-        "solarVoltage": 15.2,
-        "energyConsumed": 1.5,
-        "dryingRate": 0.02
-    }
-
-    Response:
-    {
-        "predictedMoisture30min": 17.2,
-        "estimatedMinutesToTarget": 145.0,
-        "recommendation": "...",
-        "recommendationType": "optimal",
-        "efficiencyScore": 78,
-        "confidence": 0.92,
-        "isDryingComplete": false,
-        "targetMoisture": 14.0,
-        "algorithm": "RandomForest+GradientBoosting v1.0.0",
-        "projectedCurve": [...]
-    }
-    """
-    if moisture_model is None:
+    """Main prediction endpoint."""
+    if moisture_model_rf is None:
         return jsonify({"error": "Models not loaded. Service starting up."}), 503
 
     data = request.get_json()
     if not data:
         return jsonify({"error": "Request body required"}), 400
 
-    # Validate required fields
     required = ["temperature", "humidity", "moisture", "fanSpeed"]
     missing = [f for f in required if f not in data and f.lower() not in data]
     if missing:
         return jsonify({"error": f"Missing required fields: {missing}"}), 400
 
     try:
-        # Extract current values from request
         moisture = data.get("moisture", 20.0)
         temperature = data.get("temperature", 45.0)
         humidity = data.get("humidity", 60.0)
@@ -253,19 +329,15 @@ def predict():
 
         features = prepare_features(data)
 
-        # Predict moisture 30 minutes ahead
-        predicted_moisture = float(moisture_model.predict(features)[0])
-        # Physical constraint: moisture can't increase during active drying
+        predicted_moisture = predict_moisture(features)
         predicted_moisture = min(predicted_moisture, moisture)
         predicted_moisture = round(max(8.0, min(30.0, predicted_moisture)), 2)
 
-        # Estimate time to target using the 30-min prediction rate
         moisture_drop_30min = moisture - predicted_moisture
         remaining = moisture - TARGET_MOISTURE
         if moisture <= TARGET_MOISTURE:
             estimated_time = 0.0
         elif remaining < 1.0:
-            # Very close to target — estimate based on small remaining gap
             rate = max(moisture_drop_30min, 0.05)
             estimated_time = round((remaining / rate) * 30.0, 1)
         elif moisture_drop_30min > 0.05:
@@ -274,34 +346,24 @@ def predict():
         else:
             estimated_time = 720.0
 
-        # Is drying complete?
-        is_complete = moisture <= TARGET_MOISTURE
-
-        # Recommendation
         rec = generate_recommendation(
-            moisture, temperature, humidity, fan_speed,
-            predicted_moisture, estimated_time
+            moisture, temperature, humidity, fan_speed, predicted_moisture, estimated_time
         )
-
-        # Efficiency score
         efficiency = calculate_efficiency(
             temperature, humidity, fan_speed, solar_voltage, drying_rate
         )
-
-        # Confidence
         confidence = calculate_confidence(moisture, drying_rate, time_elapsed)
 
-        # Generate 6-hour projected curve (every 30 minutes = 13 points)
         curve = []
         current_m = moisture
         for i in range(13):
             t_offset = i * 30
             future_features = features.copy()
-            future_features[0, 5] = time_elapsed + t_offset  # time_elapsed
-            future_features[0, 2] = current_m  # current moisture
-            future_features[0, 8] = current_m - TARGET_MOISTURE  # moisture diff
+            future_features[0, 5] = time_elapsed + t_offset
+            future_features[0, 2] = current_m
+            future_features[0, 8] = current_m - TARGET_MOISTURE
 
-            pred_m = float(moisture_model.predict(future_features)[0])
+            pred_m = predict_moisture(future_features)
             pred_m = max(TARGET_MOISTURE - 1.0, min(current_m, pred_m))
             current_m = pred_m
 
@@ -310,24 +372,25 @@ def predict():
                 "predictedMoisture": round(pred_m, 2),
             })
 
-        response = {
+        algorithm = (
+            f"Ensemble (RF+XGBoost) v{model_metadata['version']}"
+            if moisture_model_xgb is not None and model_metadata
+            else f"RandomForest v{model_metadata['version'] if model_metadata else '2.0.0'}"
+        )
+
+        return jsonify({
             "predictedMoisture30min": predicted_moisture,
             "estimatedMinutesToTarget": estimated_time,
             "recommendation": rec["text"],
             "recommendationType": rec["type"],
             "efficiencyScore": efficiency,
             "confidence": confidence,
-            "isDryingComplete": is_complete,
+            "isDryingComplete": moisture <= TARGET_MOISTURE,
             "targetMoisture": TARGET_MOISTURE,
-            "algorithm": f"RandomForest v{model_metadata['version']}",
+            "algorithm": algorithm,
             "projectedCurve": curve,
-            "modelMetrics": {
-                "moistureR2": model_metadata["metrics"]["moisture_prediction"]["test"]["r2"],
-                "timeR2": model_metadata["metrics"]["time_prediction"]["test"]["r2"],
-            },
-        }
-
-        return jsonify(response)
+            "modelMetrics": model_metrics_payload(),
+        })
 
     except Exception as e:
         return jsonify({"error": f"Prediction failed: {str(e)}"}), 500
@@ -335,11 +398,8 @@ def predict():
 
 @app.route("/predict/curve", methods=["POST"])
 def predict_curve():
-    """
-    Generate detailed moisture projection curve.
-    Same input as /predict, returns only the curve with more resolution.
-    """
-    if moisture_model is None:
+    """Generate detailed moisture projection curve."""
+    if moisture_model_rf is None:
         return jsonify({"error": "Models not loaded"}), 503
 
     data = request.get_json()
@@ -351,7 +411,6 @@ def predict_curve():
         moisture = data.get("moisture", 20.0)
         time_elapsed = data.get("timeElapsed", data.get("time_elapsed", 0))
 
-        # Generate curve every 15 minutes for 8 hours (33 points)
         curve = []
         current_m = moisture
 
@@ -362,7 +421,7 @@ def predict_curve():
             future_features[0, 2] = current_m
             future_features[0, 8] = current_m - TARGET_MOISTURE
 
-            pred_m = float(moisture_model.predict(future_features)[0])
+            pred_m = predict_moisture(future_features)
             pred_m = max(TARGET_MOISTURE - 1.5, min(current_m + 0.1, pred_m))
             current_m = pred_m
 
@@ -380,13 +439,14 @@ def predict_curve():
             "currentMoisture": moisture,
             "targetMoisture": TARGET_MOISTURE,
             "totalPointsGenerated": len(curve),
+            "algorithm": active_algorithm_name(),
+            "modelMetrics": model_metrics_payload(),
         })
 
     except Exception as e:
         return jsonify({"error": f"Curve generation failed: {str(e)}"}), 500
 
 
-# Load models on import
 models_loaded = load_models()
 
 if __name__ == "__main__":
